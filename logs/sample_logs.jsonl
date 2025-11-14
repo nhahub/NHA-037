@@ -421,3 +421,6 @@
 {"sensor_id": 19, "timestamp": "2025-10-24T23:45:53.185240", "temperature": 29.04, "humidity": 59.45}
 {"sensor_id": 46, "timestamp": "2025-10-24T23:45:58.186026", "temperature": 15.45, "humidity": 43.66}
 {"sensor_id": 6, "timestamp": "2025-10-24T23:46:03.187128", "temperature": 29.31, "humidity": 57.42}
+{"sensor_id": 4, "timestamp": "2025-11-14T23:04:31.526696", "temperature": 24.35, "humidity": 42.56}
+{"sensor_id": 38, "timestamp": "2025-11-14T23:04:36.528405", "temperature": 15.69, "humidity": 43.49}
+{"sensor_id": 4, "timestamp": "2025-11-14T23:04:41.529443", "temperature": 24.14, "humidity": 85.01}
