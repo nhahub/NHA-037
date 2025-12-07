@@ -138,7 +138,6 @@ def check_alerts(**context):
 
     alerts = []
 
-    # Check temperature alerts
     temp_alerts = df[df["temperature"] > TEMP_THRESHOLD]
     for _, row in temp_alerts.iterrows():
         alerts.append(
@@ -151,7 +150,7 @@ def check_alerts(**context):
             }
         )
 
-    # Check humidity alerts
+ 
     humidity_alerts = df[df["humidity"] > HUMIDITY_THRESHOLD]
     for _, row in humidity_alerts.iterrows():
         alerts.append(
@@ -237,8 +236,6 @@ with DAG(
         task_id="send_alert_email", python_callable=send_alert_email
     )
 
-    # Email alert is optional - commented out until SMTP is configured
-    # Uncomment these lines after setting up email in .env file
     email_alert = EmailOperator(
         task_id="email_alert",
         to=ALERT_EMAIL,
@@ -246,8 +243,7 @@ with DAG(
         html_content="{{ ti.xcom_pull(task_ids='send_alert_email', key='email_body') }}",
     )
 
-    # Main pipeline - will complete successfully
     start >> extract >> transform >> create_table_task >> load2 >> check_alerts_task
 
-    # Email tasks disabled until SMTP configured
+  
     check_alerts_task >> send_alert_task >> email_alert
