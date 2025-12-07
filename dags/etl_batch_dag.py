@@ -1,6 +1,5 @@
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.operators.email import EmailOperator
 import json
 import logging
 import os
@@ -9,18 +8,21 @@ from kafka import KafkaConsumer
 from datetime import datetime
 import pandas as pd
 import sqlalchemy
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 log = logging.getLogger(__name__)
 
 load_dotenv()
 KAFKA_BROKER = os.getenv("KAFKA_BROKER_INTERNAL")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_SENSOR_DATA")
-timeout = 10000
+timeout = 5000  # Reduced to 5 seconds for faster completion
 
 # Alert Thresholds
 TEMP_THRESHOLD = 45.0
 HUMIDITY_THRESHOLD = 85.0
-ALERT_EMAIL = os.getenv("ALERT_EMAIL", "es-mohamed.bassam2027@alexu.edu.eg")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "es.mohamed.eliwa2023@alexu.edu.eg")
 
 
 def start_pipline():
@@ -35,19 +37,40 @@ def extract_data(**context):
     data = []
 
     try:
-        # Create a consumer with a unique group_id
+        # Create a consumer with optimized settings
         consumer = KafkaConsumer(
             KAFKA_TOPIC,
             bootstrap_servers=[KAFKA_BROKER],
-            auto_offset_reset="earliest",
+            auto_offset_reset="latest",  
             group_id="batch-processor-group",
-            consumer_timeout_ms=timeout,  # Stops iterating after 10s of no messages
+            consumer_timeout_ms=timeout, 
+            max_poll_records=500,  
+            fetch_min_bytes=1,  # Don't wait for data to accumulate
+            fetch_max_wait_ms=500,  # Wait max 500ms for fetch_min_bytes
+            enable_auto_commit=True,  # Auto-commit offsets
+            auto_commit_interval_ms=5000,  # Commit every 5 seconds
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
         )
 
-        # Consume all available messages
+        log.info("Starting message consumption...")
+        message_count = 0
+        start_time = datetime.now()
+        max_duration_seconds = 60  # Maximum 60 seconds for extraction
+
         for message in consumer:
             data.append(message.value)
+            message_count += 1
+
+            if message_count % 100 == 0:
+                log.info(f"Consumed {message_count} messages so far...")
+
+            # Stop if we've been consuming for too long
+            elapsed = (datetime.now() - start_time).total_seconds()
+            if elapsed > max_duration_seconds:
+                log.warning(
+                    f"Stopping consumption after {elapsed:.1f}s (max: {max_duration_seconds}s)"
+                )
+                break
 
         consumer.close()
 
@@ -67,8 +90,9 @@ def process_data(**context):
     data = context["ti"].xcom_pull(key="data", task_ids="extract")
 
     if not data:
-        log.error("No data received from extract task!")
-        # raise ValueError("No data to process")
+        log.warning("No data received from extract task! Pushing empty result.")
+        context["ti"].xcom_push(key="cleaned_data", value=[])
+        return
 
     log.info(f"Processing {len(data)} records")
     df = pd.DataFrame(data)
@@ -122,8 +146,8 @@ def load_data(**context):
         inplace=True,
     )
 
-    avg_df.to_sql("sensor_avg", con=engine, if_exists="replace", index=False)
-    df.to_sql("sensor_readings", con=engine, if_exists="replace", index=False)
+    avg_df.to_sql("sensor_avg", con=engine, if_exists="append", index=False)
+    df.to_sql("sensor_readings", con=engine, if_exists="append", index=False)
 
 
 def check_alerts(**context):
@@ -150,7 +174,6 @@ def check_alerts(**context):
             }
         )
 
- 
     humidity_alerts = df[df["humidity"] > HUMIDITY_THRESHOLD]
     for _, row in humidity_alerts.iterrows():
         alerts.append(
@@ -174,7 +197,7 @@ def check_alerts(**context):
 
 def send_alert_email(**context):
     """
-    Send email with alert details
+    Send email with alert details using SMTP directly
     """
     alerts = context["ti"].xcom_pull(key="alerts", task_ids="check_alerts")
 
@@ -199,8 +222,33 @@ def send_alert_email(**context):
 
     email_body += "</table>"
 
-    context["ti"].xcom_push(key="email_body", value=email_body)
-    log.info(f"Prepared alert email with {len(alerts)} alerts")
+    # Send email directly using SMTP
+    try:
+        smtp_host = os.getenv("AIRFLOW__SMTP__SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.getenv("AIRFLOW__SMTP__SMTP_PORT", "587"))
+        smtp_user = os.getenv("AIRFLOW__SMTP__SMTP_USER")
+        smtp_password = os.getenv("AIRFLOW__SMTP__SMTP_PASSWORD")
+        smtp_from = os.getenv("AIRFLOW__SMTP__SMTP_MAIL_FROM", smtp_user)
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"IoT Sensor Alert - {datetime.now().strftime('%Y-%m-%d')}"
+        msg["From"] = smtp_from
+        msg["To"] = ALERT_EMAIL
+
+        html_part = MIMEText(email_body, "html")
+        msg.attach(html_part)
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_from, [ALERT_EMAIL], msg.as_string())
+
+        log.info(
+            f"Successfully sent alert email to {ALERT_EMAIL} with {len(alerts)} alerts"
+        )
+    except Exception as e:
+        log.error(f"Failed to send alert email: {e}")
+        raise
 
 
 default_args = {
@@ -236,14 +284,12 @@ with DAG(
         task_id="send_alert_email", python_callable=send_alert_email
     )
 
-    email_alert = EmailOperator(
-        task_id="email_alert",
-        to=ALERT_EMAIL,
-        subject="IoT Sensor Alert - {{ ds }}",
-        html_content="{{ ti.xcom_pull(task_ids='send_alert_email', key='email_body') }}",
+    (
+        start
+        >> extract
+        >> transform
+        >> create_table_task
+        >> load2
+        >> check_alerts_task
+        >> send_alert_task
     )
-
-    start >> extract >> transform >> create_table_task >> load2 >> check_alerts_task
-
-  
-    check_alerts_task >> send_alert_task >> email_alert
